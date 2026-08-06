@@ -16,7 +16,8 @@
 #include <curl/curl.h>
 #include "cJSON.h"
 
-// Debug mode: set PARALLEL_DEBUG=1 to get stderr logging
+/* ── debug ──────────────────────────────────────────────────── */
+
 static int debug = 0;
 
 static void dbg(const char *fmt, ...) {
@@ -33,83 +34,42 @@ static void dbg(const char *fmt, ...) {
 char *parallel_search(const char *api_base, const char *api_key, const char *objective);
 char *parallel_extract(const char *api_base, const char *api_key, const char *urls_csv, const char *objective);
 
-/* ── API key detection ──────────────────────────────────────── */
+/* ── reusable curl handle + headers ─────────────────────────── */
 
-/*
- * Matches: PARALLEL_API_KEY, PARALLEL_KEY, PARALLELSECRET,
- *          PARALLEL_TOKEN, PARALLEL-API-KEY, plus case variants.
- * Pattern: PARALLEL[_-]?(API[_-]?)?(KEY|SECRET|TOKEN)
- */
-static int match_key_var(const char *name) {
-    const char *p = name;
-    /* match PARALLEL (case-insensitive) */
-    if (tolower(p[0]) != 'p' || tolower(p[1]) != 'a' || tolower(p[2]) != 'r' ||
-        tolower(p[3]) != 'a' || tolower(p[4]) != 'l' || tolower(p[5]) != 'l' ||
-        tolower(p[6]) != 'l' || tolower(p[7]) != 'e' || tolower(p[8]) != 'l')
-        return 0;
-    p += 9;
+static CURL *g_curl = NULL;
+static struct curl_slist *g_headers_json = NULL;   /* Content-Type only */
+static struct curl_slist *g_headers_auth = NULL;    /* Content-Type + x-api-key */
 
-    /* optional [_-] */
-    if (*p == '_' || *p == '-') p++;
+static char g_current_key[256] = {0};
 
-    /* optional API[_-] */
-    if (tolower(p[0]) == 'a' && tolower(p[1]) == 'p' && tolower(p[2]) == 'i') {
-        p += 3;
-        if (*p == '_' || *p == '-') p++;
+static void ensure_curl(void) {
+    if (!g_curl) {
+        g_curl = curl_easy_init();
+        /* Pre-set options that never change */
+        curl_easy_setopt(g_curl, CURLOPT_POST, 1L);
+        curl_easy_setopt(g_curl, CURLOPT_WRITEFUNCTION, NULL); /* set per-call */
+        curl_easy_setopt(g_curl, CURLOPT_TIMEOUT, 30L);
+        curl_easy_setopt(g_curl, CURLOPT_NOSIGNAL, 1L);        /* skip signal handlers */
+        curl_easy_setopt(g_curl, CURLOPT_TCP_KEEPALIVE, 1L);    /* reuse connections */
+        curl_easy_setopt(g_curl, CURLOPT_TCP_KEEPIDLE, 120L);
+
+        g_headers_json = curl_slist_append(NULL, "Content-Type: application/json");
     }
-
-    /* KEY, SECRET, or TOKEN */
-    if ((p[0]|0x20) == 'k' && (p[1]|0x20) == 'e' && (p[2]|0x20) == 'y' && p[3] == '\0') return 1;
-    if ((p[0]|0x20) == 's' && (p[1]|0x20) == 'e' && (p[2]|0x20) == 'c' &&
-        (p[3]|0x20) == 'r' && (p[4]|0x20) == 'e' && (p[5]|0x20) == 't' && p[6] == '\0') return 1;
-    if ((p[0]|0x20) == 't' && (p[1]|0x20) == 'o' && (p[2]|0x20) == 'k' &&
-        (p[3]|0x20) == 'e' && (p[4]|0x20) == 'n' && p[5] == '\0') return 1;
-
-    return 0;
 }
 
-/* Check a single env var, return trimmed value or NULL */
-static char *try_env(const char *name) {
-    const char *val = getenv(name);
-    if (!val || !*val) return NULL;
-    while (*val == ' ' || *val == '\t') val++;
-    if (!*val) return NULL;
-    const char *end = val + strlen(val) - 1;
-    while (end > val && (*end == ' ' || *end == '\t')) end--;
-    size_t len = end - val + 1;
-    char *result = malloc(len + 1);
-    memcpy(result, val, len);
-    result[len] = '\0';
-    return result;
-}
+static struct curl_slist *get_headers(const char *api_key) {
+    if (!api_key || !*api_key) return g_headers_json;
 
-char *parallel_find_key(void) {
-    /* Ordered by likelihood. getenv is fast but we check each name explicitly
-       because environ may not be available in shared library context. */
-    static const char *candidates[] = {
-        "PARALLEL_API_KEY",
-        "PARALLEL_KEY",
-        "PARALLELSECRET",
-        "PARALLEL_TOKEN",
-        "PARALLEL-API-KEY",
-        "parallel_api_key",
-        "parallel_key",
-        "parallelsecret",
-        "parallel_token",
-        "parallel-api-key",
-        "Parallel_Key",
-        "Parallel_Token",
-        NULL
-    };
-    for (const char **c = candidates; *c; c++) {
-        char *val = try_env(*c);
-        if (val) {
-            dbg("parallel_find_key: found %s", *c);
-            return val;
-        }
+    /* Rebuild auth header only when key changes */
+    if (strcmp(api_key, g_current_key) != 0) {
+        if (g_headers_auth) curl_slist_free_all(g_headers_auth);
+        char auth[512];
+        snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
+        g_headers_auth = curl_slist_append(
+            curl_slist_append(NULL, "Content-Type: application/json"), auth);
+        snprintf(g_current_key, sizeof(g_current_key), "%s", api_key);
     }
-    dbg("parallel_find_key: no key found");
-    return NULL;
+    return g_headers_auth;
 }
 
 /* ── curl write callback ─────────────────────────────────────── */
@@ -137,39 +97,28 @@ static size_t write_cb(void *ptr, size_t size, size_t nmemb, void *userdata) {
 /* ── HTTP POST ───────────────────────────────────────────────── */
 
 static char *http_post(const char *url, const char *body, const char *api_key) {
-    CURL *curl = curl_easy_init();
-    if (!curl) return NULL;
+    ensure_curl();
 
     Buffer buf = { .data = malloc(4096), .len = 0, .cap = 4096 };
     buf.data[0] = '\0';
 
-    struct curl_slist *headers = NULL;
-    headers = curl_slist_append(headers, "Content-Type: application/json");
-    if (api_key && *api_key) {
-        char auth[512];
-        snprintf(auth, sizeof(auth), "x-api-key: %s", api_key);
-        headers = curl_slist_append(headers, auth);
-    }
+    curl_easy_setopt(g_curl, CURLOPT_URL, url);
+    curl_easy_setopt(g_curl, CURLOPT_POSTFIELDS, body);
+    curl_easy_setopt(g_curl, CURLOPT_HTTPHEADER, get_headers(api_key));
+    curl_easy_setopt(g_curl, CURLOPT_WRITEFUNCTION, write_cb);
+    curl_easy_setopt(g_curl, CURLOPT_WRITEDATA, &buf);
 
-    curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_POST, 1L);
-    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
-    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
+    /* Reset connection reuse for different hosts */
+    curl_easy_setopt(g_curl, CURLOPT_FRESH_CONNECT, 0L);
 
-    CURLcode res = curl_easy_perform(curl);
+    CURLcode res = curl_easy_perform(g_curl);
     long status = 0;
-    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+    curl_easy_getinfo(g_curl, CURLINFO_RESPONSE_CODE, &status);
 
     dbg("curl perform: res=%d status=%ld", (int)res, status);
     if (res != CURLE_OK) {
         dbg("curl error: %s", curl_easy_strerror(res));
     }
-
-    curl_slist_free_all(headers);
-    curl_easy_cleanup(curl);
 
     if (res != CURLE_OK || status >= 400) {
         free(buf.data);
@@ -178,7 +127,7 @@ static char *http_post(const char *url, const char *body, const char *api_key) {
     return buf.data;
 }
 
-/* ── string builder ──────────────────────────────────────────── */
+/* ── string builder (length-aware, no repeated strlen) ──────── */
 
 typedef struct {
     char *data;
@@ -190,18 +139,27 @@ static void sb_init(StringBuilder *sb) {
     sb->cap = 4096;
     sb->data = malloc(sb->cap);
     sb->len = 0;
-    sb->data[0] = '\0';
 }
 
-static void sb_append(StringBuilder *sb, const char *s) {
-    size_t slen = strlen(s);
-    while (sb->len + slen + 1 > sb->cap) {
-        sb->cap *= 2;
+static inline void sb_append_n(StringBuilder *sb, const char *s, size_t n) {
+    if (sb->len + n + 1 > sb->cap) {
+        sb->cap = (sb->len + n + 1) * 2;
         sb->data = realloc(sb->data, sb->cap);
     }
-    memcpy(sb->data + sb->len, s, slen);
-    sb->len += slen;
+    memcpy(sb->data + sb->len, s, n);
+    sb->len += n;
+}
+
+/* Compile-time strlen for string literals */
+#define SB_LIT(sb, lit) sb_append_n(sb, lit, sizeof(lit) - 1)
+
+static inline void sb_append(StringBuilder *sb, const char *s) {
+    sb_append_n(sb, s, strlen(s));
+}
+
+static inline char *sb_detach(StringBuilder *sb) {
     sb->data[sb->len] = '\0';
+    return sb->data;
 }
 
 /* ── formatters ──────────────────────────────────────────────── */
@@ -210,26 +168,34 @@ static void format_search(cJSON *results, StringBuilder *sb) {
     int n = cJSON_GetArraySize(results);
     for (int i = 0; i < n; i++) {
         cJSON *r = cJSON_GetArrayItem(results, i);
+
         cJSON *title = cJSON_GetObjectItem(r, "title");
         if (cJSON_IsString(title) && title->valuestring[0]) {
-            sb_append(sb, "### "); sb_append(sb, title->valuestring); sb_append(sb, "\n");
+            SB_LIT(sb, "### ");
+            sb_append(sb, title->valuestring);
+            SB_LIT(sb, "\n");
         }
+
         cJSON *url = cJSON_GetObjectItem(r, "url");
         if (cJSON_IsString(url)) {
-            sb_append(sb, "URL: "); sb_append(sb, url->valuestring); sb_append(sb, "\n\n");
+            SB_LIT(sb, "URL: ");
+            sb_append(sb, url->valuestring);
+            SB_LIT(sb, "\n\n");
         }
+
         cJSON *excerpts = cJSON_GetObjectItem(r, "excerpts");
         if (cJSON_IsArray(excerpts)) {
             int m = cJSON_GetArraySize(excerpts);
             for (int j = 0; j < m; j++) {
                 cJSON *e = cJSON_GetArrayItem(excerpts, j);
                 if (cJSON_IsString(e)) {
-                    sb_append(sb, "> "); sb_append(sb, e->valuestring);
-                    if (j < m - 1) sb_append(sb, "\n\n");
+                    SB_LIT(sb, "> ");
+                    sb_append(sb, e->valuestring);
+                    if (j < m - 1) SB_LIT(sb, "\n\n");
                 }
             }
         }
-        if (i < n - 1) sb_append(sb, "\n\n---\n\n");
+        if (i < n - 1) SB_LIT(sb, "\n\n---\n\n");
     }
 }
 
@@ -237,14 +203,21 @@ static void format_extract(cJSON *results, StringBuilder *sb) {
     int n = cJSON_GetArraySize(results);
     for (int i = 0; i < n; i++) {
         cJSON *r = cJSON_GetArrayItem(results, i);
+
         cJSON *title = cJSON_GetObjectItem(r, "title");
         if (cJSON_IsString(title) && title->valuestring[0]) {
-            sb_append(sb, "### "); sb_append(sb, title->valuestring); sb_append(sb, "\n");
+            SB_LIT(sb, "### ");
+            sb_append(sb, title->valuestring);
+            SB_LIT(sb, "\n");
         }
+
         cJSON *url = cJSON_GetObjectItem(r, "url");
         if (cJSON_IsString(url)) {
-            sb_append(sb, "URL: "); sb_append(sb, url->valuestring); sb_append(sb, "\n\n");
+            SB_LIT(sb, "URL: ");
+            sb_append(sb, url->valuestring);
+            SB_LIT(sb, "\n\n");
         }
+
         cJSON *full = cJSON_GetObjectItem(r, "full_content");
         if (cJSON_IsString(full) && full->valuestring[0]) {
             sb_append(sb, full->valuestring);
@@ -256,13 +229,49 @@ static void format_extract(cJSON *results, StringBuilder *sb) {
                     cJSON *e = cJSON_GetArrayItem(excerpts, j);
                     if (cJSON_IsString(e)) {
                         sb_append(sb, e->valuestring);
-                        if (j < m - 1) sb_append(sb, "\n\n");
+                        if (j < m - 1) SB_LIT(sb, "\n\n");
                     }
                 }
             }
         }
-        if (i < n - 1) sb_append(sb, "\n\n---\n\n");
+        if (i < n - 1) SB_LIT(sb, "\n\n---\n\n");
     }
+}
+
+/* ── API key detection ──────────────────────────────────────── */
+
+static char *try_env(const char *name) {
+    const char *val = getenv(name);
+    if (!val || !*val) return NULL;
+    while (*val == ' ' || *val == '\t') val++;
+    if (!*val) return NULL;
+    const char *end = val + strlen(val) - 1;
+    while (end > val && (*end == ' ' || *end == '\t')) end--;
+    size_t len = end - val + 1;
+    char *result = malloc(len + 1);
+    memcpy(result, val, len);
+    result[len] = '\0';
+    return result;
+}
+
+char *parallel_find_key(void) {
+    static const char *candidates[] = {
+        "PARALLEL_API_KEY", "PARALLEL_KEY", "PARALLELSECRET",
+        "PARALLEL_TOKEN", "PARALLEL-API-KEY",
+        "parallel_api_key", "parallel_key", "parallelsecret",
+        "parallel_token", "parallel-api-key",
+        "Parallel_Key", "Parallel_Token",
+        NULL
+    };
+    for (const char **c = candidates; *c; c++) {
+        char *val = try_env(*c);
+        if (val) {
+            dbg("parallel_find_key: found %s", *c);
+            return val;
+        }
+    }
+    dbg("parallel_find_key: no key found");
+    return NULL;
 }
 
 /* ── core: fetch + parse + format ────────────────────────────── */
@@ -270,8 +279,14 @@ static void format_extract(cJSON *results, StringBuilder *sb) {
 static char *do_request(const char *api_base, const char *api_key,
                         const char *endpoint, const char *req_body,
                         int is_search) {
+    /* Build URL on stack — no malloc */
     char url[1024];
-    snprintf(url, sizeof(url), "%s/%s", api_base, endpoint);
+    int base_len = strlen(api_base);
+    int ep_len = strlen(endpoint);
+    if (base_len + 1 + ep_len >= (int)sizeof(url)) return NULL;
+    memcpy(url, api_base, base_len);
+    url[base_len] = '/';
+    memcpy(url + base_len + 1, endpoint, ep_len + 1);
 
     char *resp = http_post(url, req_body, api_key);
     if (!resp) return NULL;
@@ -290,10 +305,8 @@ static char *do_request(const char *api_base, const char *api_key,
     else           format_extract(results, &sb);
 
     cJSON_Delete(root);
-    return sb.data;  /* caller must free */
+    return sb_detach(&sb);
 }
-
-/* ── public API ──────────────────────────────────────────────── */
 
 /* ── init (call once) ───────────────────────────────────────── */
 
@@ -306,6 +319,58 @@ void parallel_init(void) {
         dbg("parallel_init: curl initialized");
         initialized = 1;
     }
+}
+
+/* ── build request JSON without cJSON overhead ───────────────── */
+
+static char *build_search_body(const char *objective, char *buf, size_t bufsz) {
+    /* {"objective":"..."} — escape is caller's problem for now */
+    int n = snprintf(buf, bufsz, "{\"objective\":\"%s\"}", objective);
+    return (n > 0 && (size_t)n < bufsz) ? buf : NULL;
+}
+
+static char *build_extract_body(const char *urls_csv, const char *objective,
+                                char *buf, size_t bufsz) {
+    char *p = buf;
+    char *end = buf + bufsz - 1;
+
+    /* Open brace + urls array open */
+    int n = snprintf(p, end - p, "{\"urls\":[");
+    if (n < 0 || p + n >= end) return NULL;
+    p += n;
+
+    /* Split urls_csv on comma, wrap each in quotes */
+    const char *tok = urls_csv;
+    int first = 1;
+    while (*tok) {
+        const char *comma = strchr(tok, ',');
+        size_t tlen = comma ? (size_t)(comma - tok) : strlen(tok);
+        if (!first) { *p++ = ','; }
+        *p++ = '"';
+        if (p + tlen >= end) return NULL;
+        memcpy(p, tok, tlen);
+        p += tlen;
+        *p++ = '"';
+        first = 0;
+        tok += tlen;
+        if (comma) tok++; /* skip comma */
+    }
+
+    /* Close urls array */
+    n = snprintf(p, end - p, "]");
+    if (n < 0 || p + n >= end) return NULL;
+    p += n;
+
+    /* Optional objective */
+    if (objective && *objective) {
+        n = snprintf(p, end - p, ",\"objective\":\"%s\"", objective);
+        if (n < 0 || p + n >= end) return NULL;
+        p += n;
+    }
+
+    *p++ = '}';
+    *p = '\0';
+    return buf;
 }
 
 /* ── convenience: search with auto-key ─────────────────────── */
@@ -330,40 +395,29 @@ char *parallel_extract_auto(const char *api_base, const char *urls_csv, const ch
 
 char *parallel_search(const char *api_base, const char *api_key, const char *objective) {
     parallel_init();
-    cJSON *req = cJSON_CreateObject();
-    cJSON_AddStringToObject(req, "objective", objective);
-    char *body = cJSON_PrintUnformatted(req);
-    cJSON_Delete(req);
-
-    char *result = do_request(api_base, api_key, "search", body, 1);
-    free(body);
-    return result;
+    char body[4096];
+    if (!build_search_body(objective, body, sizeof(body))) return NULL;
+    return do_request(api_base, api_key, "search", body, 1);
 }
 
 char *parallel_extract(const char *api_base, const char *api_key,
                        const char *urls_csv, const char *objective) {
     parallel_init();
-    cJSON *req = cJSON_CreateObject();
-    cJSON *urls = cJSON_CreateArray();
-    char *dup = strdup(urls_csv);
-    char *tok = strtok(dup, ",");
-    while (tok) {
-        cJSON_AddItemToArray(urls, cJSON_CreateString(tok));
-        tok = strtok(NULL, ",");
-    }
-    free(dup);
-    cJSON_AddItemToObject(req, "urls", urls);
-    if (objective && *objective) {
-        cJSON_AddStringToObject(req, "objective", objective);
-    }
-    char *body = cJSON_PrintUnformatted(req);
-    cJSON_Delete(req);
-
-    char *result = do_request(api_base, api_key, "extract", body, 0);
-    free(body);
-    return result;
+    char body[8192];
+    if (!build_extract_body(urls_csv, objective, body, sizeof(body))) return NULL;
+    return do_request(api_base, api_key, "extract", body, 0);
 }
 
 void parallel_free(char *ptr) {
     free(ptr);
+}
+
+/* ── cleanup (optional, for testing) ────────────────────────── */
+
+void parallel_cleanup(void) {
+    if (g_headers_auth) { curl_slist_free_all(g_headers_auth); g_headers_auth = NULL; }
+    if (g_headers_json) { curl_slist_free_all(g_headers_json); g_headers_json = NULL; }
+    if (g_curl) { curl_easy_cleanup(g_curl); g_curl = NULL; }
+    curl_global_cleanup();
+    initialized = 0;
 }
