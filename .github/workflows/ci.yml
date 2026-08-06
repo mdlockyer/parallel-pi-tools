@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node: [20, 22]
+
+    runs-on: ${{ matrix.os }}
+    name: test / ${{ matrix.os }} / node ${{ matrix.node }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcurl4-openssl-dev
+
+      - name: Build native
+        run: make native
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: Run tests
+        run: make test
+
+  benchmark:
+    runs-on: macos-latest
+    name: benchmark / macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Build native
+        run: make native
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: Run benchmark
+        run: make bench
