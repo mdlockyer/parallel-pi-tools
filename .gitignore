@@ -15,3 +15,6 @@ node_modules/
 # Env
 .env
 .env.local
+
+# Build artifacts
+native/parallel
