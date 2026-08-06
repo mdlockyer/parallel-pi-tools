@@ -211,6 +211,10 @@ int main(int argc, char **argv) {
     if (is_search) {
         if (argc < 5) { fprintf(stderr, "missing objective\n"); return 1; }
         cJSON_AddStringToObject(req, "objective", argv[4]);
+        /* API requires search_queries — default to [objective] */
+        cJSON *queries = cJSON_CreateArray();
+        cJSON_AddItemToArray(queries, cJSON_CreateString(argv[4]));
+        cJSON_AddItemToObject(req, "search_queries", queries);
     } else {
         if (argc < 5) { fprintf(stderr, "missing urls\n"); return 1; }
         cJSON *urls = cJSON_CreateArray();

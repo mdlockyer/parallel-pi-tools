@@ -324,8 +324,8 @@ void parallel_init(void) {
 /* ── build request JSON without cJSON overhead ───────────────── */
 
 static char *build_search_body(const char *objective, char *buf, size_t bufsz) {
-    /* {"objective":"..."} — escape is caller's problem for now */
-    int n = snprintf(buf, bufsz, "{\"objective\":\"%s\"}", objective);
+    /* {"objective":"...","search_queries":["..."]} — API requires search_queries */
+    int n = snprintf(buf, bufsz, "{\"objective\":\"%s\",\"search_queries\":[\"%s\"]}", objective, objective);
     return (n > 0 && (size_t)n < bufsz) ? buf : NULL;
 }
 

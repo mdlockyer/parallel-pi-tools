@@ -54,13 +54,13 @@ export default function (pi: ExtensionAPI) {
     async execute(_toolCallId, params) {
       try {
         let text: string;
+        const queries = params.search_queries?.length ? params.search_queries : [params.objective];
 
         if (apiKey) {
-          text = await apiSearch(apiKey, params.objective, params.search_queries);
+          text = await apiSearch(apiKey, params.objective, queries);
         } else {
-          const args: Record<string, unknown> = { objective: params.objective };
-          if (params.search_queries?.length) args.search_queries = params.search_queries;
-          const result = await callMcpTool("web_search", args);
+          const args: Record<string, unknown> = { objective: params.objective, search_queries: queries };
+          const result = await callMcpTool("web_search", { objective: params.objective, search_queries: queries });
           text = extractMcpText(result);
           if (result.isError) throw new Error(text || "Search returned an error");
         }
