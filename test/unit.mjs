@@ -11,6 +11,10 @@ import {
   extractMcpText,
 } from "../lib/parallel.mjs";
 import { createMockServer } from "./mock-server.mjs";
+import { nativeSearch, nativeExtract } from "../lib/native.mjs";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // --- findApiKey ---
 
@@ -180,6 +184,37 @@ describe("with mock server", () => {
         () => apiExtract("fake-key", [], undefined, { apiBase: server.url + "/v1" }),
         /Extract API failed/
       );
+    });
+  });
+
+  // --- native binary ---
+
+  describe("native binary", () => {
+    const __dirname = dirname(fileURLToPath(import.meta.url));
+    const binaryExists = existsSync(join(__dirname, "..", "native", "parallel"));
+
+    (binaryExists ? it : it.skip)("nativeSearch returns results", async () => {
+      const text = await nativeSearch(server.url + "/v1", "test-key", "test query");
+      assert.ok(text.includes("Mock Result One"));
+      assert.ok(text.includes("example.com/result-1"));
+    });
+
+    (binaryExists ? it : it.skip)("nativeExtract returns results", async () => {
+      const text = await nativeExtract(server.url + "/v1", "test-key", ["https://example.com"]);
+      assert.ok(text.includes("Mock Extracted Article"));
+      assert.ok(text.includes("extracted content"));
+    });
+
+    (binaryExists ? it : it.skip)("nativeSearch output matches JS output", async () => {
+      const native = await nativeSearch(server.url + "/v1", "key", "test");
+      const js = await apiSearch("key", "test", [], { apiBase: server.url + "/v1" });
+      assert.equal(native.trim(), js.trim());
+    });
+
+    (binaryExists ? it : it.skip)("nativeExtract output matches JS output", async () => {
+      const native = await nativeExtract(server.url + "/v1", "key", ["https://example.com"]);
+      const js = await apiExtract("key", ["https://example.com"], undefined, { apiBase: server.url + "/v1" });
+      assert.equal(native.trim(), js.trim());
     });
   });
 });

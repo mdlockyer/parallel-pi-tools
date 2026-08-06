@@ -1,9 +1,9 @@
 PI_EXTENSIONS_DIR := $(HOME)/.pi/agent/extensions
 EXTENSION := parallel-search.ts
 
-.PHONY: install uninstall reinstall test bench all
+.PHONY: install uninstall reinstall test bench all native native-clean
 
-install:
+install: native
 	@mkdir -p "$(PI_EXTENSIONS_DIR)"
 	@cp "$(EXTENSION)" "$(PI_EXTENSIONS_DIR)/$(EXTENSION)"
 	@cp -r lib "$(PI_EXTENSIONS_DIR)/"
@@ -17,10 +17,16 @@ uninstall:
 
 reinstall: uninstall install
 
-test:
+native:
+	@$(MAKE) -C native
+
+native-clean:
+	@$(MAKE) -C native clean
+
+test: native
 	@node --test test/unit.mjs
 
-bench:
+bench: native
 	@node test/benchmark.mjs
 
 all: test bench

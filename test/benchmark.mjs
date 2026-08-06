@@ -9,6 +9,7 @@ import {
   apiExtract,
   extractMcpText,
 } from "../lib/parallel.mjs";
+import { nativeSearch, nativeExtract } from "../lib/native.mjs";
 
 const ITERATIONS = 100;
 const WARMUP = 10;
@@ -116,6 +117,23 @@ async function main() {
       () => callMcpTool("web_fetch", { urls: ["https://example.com"] }, { mcpUrl: server.url + "/mcp" })
     );
 
+    // --- Native C binary (subprocess) ---
+    let nativeSearchStats, nativeExtractStats;
+    try {
+      nativeSearchStats = await bench(
+        "native: C binary search (subprocess)",
+        () => nativeSearch(server.url + "/v1", "bench-key", "test")
+      );
+
+      nativeExtractStats = await bench(
+        "native: C binary extract (subprocess)",
+        () => nativeExtract(server.url + "/v1", "bench-key", ["https://example.com"])
+      );
+    } catch (err) {
+      console.log(`\n  ⚠ native binary not available: ${err.message}`);
+      console.log(`    Run 'make' in native/ to build it.\n`);
+    }
+
     // --- Overhead summary ---
     console.log(`\n${"═".repeat(54)}`);
     console.log(`  OVERHEAD SUMMARY (avg)`);
@@ -128,6 +146,18 @@ async function main() {
     console.log(`  Search (API):  ${fmt(searchOverhead)} tool overhead  (${((searchOverhead / baselineSearch.avg) * 100).toFixed(1)}%)`);
     console.log(`  Extract (API): ${fmt(extractOverhead)} tool overhead  (${((extractOverhead / baselineExtract.avg) * 100).toFixed(1)}%)`);
     console.log(`  Search (MCP):  ${fmt(mcpOverhead)} tool overhead  (${((mcpOverhead / baselineMcp.avg) * 100).toFixed(1)}%)`);
+
+    if (nativeSearchStats && nativeExtractStats) {
+      const nativeSearchOverhead = nativeSearchStats.avg - baselineSearch.avg;
+      const nativeExtractOverhead = nativeExtractStats.avg - baselineExtract.avg;
+      console.log(`${"─".repeat(54)}`);
+      console.log(`  Search (C):    ${fmt(nativeSearchStats.avg)} avg  (${fmt(nativeSearchOverhead)} vs baseline, ${((nativeSearchOverhead / baselineSearch.avg) * 100).toFixed(1)}%)`);
+      console.log(`  Extract (C):   ${fmt(nativeExtractStats.avg)} avg  (${fmt(nativeExtractOverhead)} vs baseline, ${((nativeExtractOverhead / baselineExtract.avg) * 100).toFixed(1)}%)`);
+      console.log(`${"─".repeat(54)}`);
+      const jsVsNative = toolSearch.avg - nativeSearchStats.avg;
+      console.log(`  JS vs C (search):  ${jsVsNative > 0 ? "C faster by" : "JS faster by"} ${fmt(Math.abs(jsVsNative))}`);
+    }
+
     console.log(`${"═".repeat(54)}\n`);
   } finally {
     await server.close();
