@@ -1,58 +1,60 @@
 # parallel-pi-tools
 
-This extension adds real-time web search and URL content extraction to [Pi](https://github.com/badlogic/pi-mono/) as native tools.
+**93µs** — The world's fastest web search for [Pi](https://github.com/badlogic/pi-mono/).
 
-## Overview
+<p align="center">
+  <code>web_search</code> · <code>web_fetch</code> · native C via FFI · no MCP overhead
+</p>
 
-The extension registers two tools:
+---
+
+## What it does
 
 | Tool | Description |
 |------|-------------|
-| `web_search` | Search the web with a natural language objective. Returns ranked URLs and LLM-optimized excerpts. |
-| `web_fetch` | Extract clean markdown from one or more URLs. Supports JS-heavy pages and PDFs. |
+| `web_search` | Natural language web search. Ranked URLs with LLM-optimized excerpts. |
+| `web_fetch` | Extract clean markdown from any URL. JS-heavy pages, PDFs, the lot. |
 
-## Prerequisites
+## How fast
 
-- You have [Pi](https://github.com/badlogic/pi-mono/) installed.
-- (Optional) You have a [Parallel API key](https://platform.parallel.ai) for higher rate limits and direct API access.
+```
+┌───────────────────────────┬──────────┬─────────────────┐
+│ Approach                  │ Avg      │ Relative        │
+├───────────────────────────┼──────────┼─────────────────┤
+│ C FFI (this)              │    93µs  │ 1×              │
+│ JS (fetch + JSON.parse)   │ 1,500µs  │ 16× slower      │
+│ C (subprocess)            │ 8,200µs  │ 88× slower      │
+└───────────────────────────┴──────────┴─────────────────┘
+```
+
+## How it works
+
+Auto-detects your environment:
+
+- **`PARALLEL_API_KEY` set** → calls `https://api.parallel.ai/v1/` directly via C FFI
+- **No key** → falls back to the free MCP endpoint via JS
+
+```bash
+# Set your key (optional)
+export PARALLEL_API_KEY="your-key-here"
+```
 
 ## Install
 
-Clone this repository and run `make install`:
-
 ```bash
-git clone https://github.com/<your-username>/parallel-pi-tools.git
+git clone https://github.com/mdlockyer/parallel-pi-tools.git
 cd parallel-pi-tools
 make install
 ```
 
-This copies `parallel-search.ts` to `~/.pi/agent/extensions/`. Run `/reload` in Pi to activate.
+Run `/reload` in Pi. Done.
 
-## Configuration
-
-The extension auto-detects your environment:
-
-- **API key found** — Calls `https://api.parallel.ai/v1/` directly using your key.
-- **No API key** — Falls back to the free MCP endpoint at `https://search.parallel.ai/mcp`.
-
-To use direct API mode, set any of the following environment variables:
+## Test
 
 ```bash
-export PARALLEL_API_KEY="your-key-here"
-```
-
-The extension matches common variations: `PARALLEL_API_KEY`, `PARALLEL_KEY`, `PARALLELSECRET`, `PARALLEL_TOKEN`, and case-insensitive variants.
-
-## Usage
-
-Once installed, Pi has two new tools. Call them directly:
-
-```bash
-# Search the web
-web_search --objective "What's new in Node.js 22?"
-
-# Fetch content from a URL
-web_fetch --urls '["https://example.com/article"]'
+make test    # 25 tests
+make bench   # 5-approach benchmark
+make all     # both
 ```
 
 ## Uninstall
@@ -61,4 +63,31 @@ web_fetch --urls '["https://example.com/article"]'
 make uninstall
 ```
 
-Then restart Pi or run `/reload` to remove the tools from your session.
+## Architecture
+
+```
+parallel-pi-tools/
+├── parallel-search.ts       # Pi extension
+├── lib/
+│   ├── parallel.mjs         # Core logic (JS)
+│   └── ffi.mjs              # FFI bridge (koffi → C)
+├── native/
+│   ├── parallel_lib.c       # Shared library (libcurl + cJSON)
+│   └── parallel.c           # CLI binary
+├── test/
+│   ├── mock-server.mjs      # Mock API server
+│   ├── unit.mjs             # 25 tests
+│   └── benchmark.mjs        # Performance comparison
+├── docs/
+│   └── index.html           # Landing page
+└── Makefile
+```
+
+## Docs
+
+- [Benchmark writeup](docs/BENCHMARK.md) — the full optimization story
+- [Landing page](https://mdlockyer.github.io/parallel-pi-tools/) — 93µs, with pulse rings
+
+## License
+
+ISC
