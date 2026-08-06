@@ -152,7 +152,7 @@ async function main() {
 
     let ffiSearchStats, ffiExtractStats;
     try {
-      const { ffiSearch, ffiExtract } = await import("../lib/ffi.mjs");
+      const { ffiSearch, ffiExtract, ffiSearchAuto, ffiExtractAuto, ffiFindKey } = await import("../lib/ffi.mjs");
 
       ffiSearchStats = await bench(
         "native: C FFI search (in-process)",
@@ -162,6 +162,24 @@ async function main() {
       ffiExtractStats = await bench(
         "native: C FFI extract (in-process)",
         () => ffiExtract(mock.url + "/v1", "bench-key", ["https://example.com"])
+      );
+
+      // Key detection overhead
+      await bench(
+        "native: C key detection (getenv scan)",
+        () => ffiFindKey(),
+        1000
+      );
+
+      // Full pipeline: key detection + search in one FFI call
+      await bench(
+        "native: C FFI search_auto (full pipeline)",
+        () => ffiSearchAuto(mock.url + "/v1", "test")
+      );
+
+      await bench(
+        "native: C FFI extract_auto (full pipeline)",
+        () => ffiExtractAuto(mock.url + "/v1", ["https://example.com"])
       );
     } catch (err) {
       console.log(`\n  ⚠ FFI not available: ${err.message}`);

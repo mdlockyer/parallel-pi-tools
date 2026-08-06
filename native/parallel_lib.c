@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
+#include <ctype.h>
 #include <curl/curl.h>
 #include "cJSON.h"
 
@@ -25,6 +26,90 @@ static void dbg(const char *fmt, ...) {
     vfprintf(stderr, fmt, ap);
     va_end(ap);
     fprintf(stderr, "\n");
+}
+
+/* ── forward declarations ───────────────────────────────────── */
+
+char *parallel_search(const char *api_base, const char *api_key, const char *objective);
+char *parallel_extract(const char *api_base, const char *api_key, const char *urls_csv, const char *objective);
+
+/* ── API key detection ──────────────────────────────────────── */
+
+/*
+ * Matches: PARALLEL_API_KEY, PARALLEL_KEY, PARALLELSECRET,
+ *          PARALLEL_TOKEN, PARALLEL-API-KEY, plus case variants.
+ * Pattern: PARALLEL[_-]?(API[_-]?)?(KEY|SECRET|TOKEN)
+ */
+static int match_key_var(const char *name) {
+    const char *p = name;
+    /* match PARALLEL (case-insensitive) */
+    if (tolower(p[0]) != 'p' || tolower(p[1]) != 'a' || tolower(p[2]) != 'r' ||
+        tolower(p[3]) != 'a' || tolower(p[4]) != 'l' || tolower(p[5]) != 'l' ||
+        tolower(p[6]) != 'l' || tolower(p[7]) != 'e' || tolower(p[8]) != 'l')
+        return 0;
+    p += 9;
+
+    /* optional [_-] */
+    if (*p == '_' || *p == '-') p++;
+
+    /* optional API[_-] */
+    if (tolower(p[0]) == 'a' && tolower(p[1]) == 'p' && tolower(p[2]) == 'i') {
+        p += 3;
+        if (*p == '_' || *p == '-') p++;
+    }
+
+    /* KEY, SECRET, or TOKEN */
+    if ((p[0]|0x20) == 'k' && (p[1]|0x20) == 'e' && (p[2]|0x20) == 'y' && p[3] == '\0') return 1;
+    if ((p[0]|0x20) == 's' && (p[1]|0x20) == 'e' && (p[2]|0x20) == 'c' &&
+        (p[3]|0x20) == 'r' && (p[4]|0x20) == 'e' && (p[5]|0x20) == 't' && p[6] == '\0') return 1;
+    if ((p[0]|0x20) == 't' && (p[1]|0x20) == 'o' && (p[2]|0x20) == 'k' &&
+        (p[3]|0x20) == 'e' && (p[4]|0x20) == 'n' && p[5] == '\0') return 1;
+
+    return 0;
+}
+
+/* Check a single env var, return trimmed value or NULL */
+static char *try_env(const char *name) {
+    const char *val = getenv(name);
+    if (!val || !*val) return NULL;
+    while (*val == ' ' || *val == '\t') val++;
+    if (!*val) return NULL;
+    const char *end = val + strlen(val) - 1;
+    while (end > val && (*end == ' ' || *end == '\t')) end--;
+    size_t len = end - val + 1;
+    char *result = malloc(len + 1);
+    memcpy(result, val, len);
+    result[len] = '\0';
+    return result;
+}
+
+char *parallel_find_key(void) {
+    /* Ordered by likelihood. getenv is fast but we check each name explicitly
+       because environ may not be available in shared library context. */
+    static const char *candidates[] = {
+        "PARALLEL_API_KEY",
+        "PARALLEL_KEY",
+        "PARALLELSECRET",
+        "PARALLEL_TOKEN",
+        "PARALLEL-API-KEY",
+        "parallel_api_key",
+        "parallel_key",
+        "parallelsecret",
+        "parallel_token",
+        "parallel-api-key",
+        "Parallel_Key",
+        "Parallel_Token",
+        NULL
+    };
+    for (const char **c = candidates; *c; c++) {
+        char *val = try_env(*c);
+        if (val) {
+            dbg("parallel_find_key: found %s", *c);
+            return val;
+        }
+    }
+    dbg("parallel_find_key: no key found");
+    return NULL;
 }
 
 /* ── curl write callback ─────────────────────────────────────── */
@@ -221,6 +306,24 @@ void parallel_init(void) {
         dbg("parallel_init: curl initialized");
         initialized = 1;
     }
+}
+
+/* ── convenience: search with auto-key ─────────────────────── */
+
+char *parallel_search_auto(const char *api_base, const char *objective) {
+    parallel_init();
+    char *key = parallel_find_key();
+    char *result = parallel_search(api_base, key ? key : "", objective);
+    free(key);
+    return result;
+}
+
+char *parallel_extract_auto(const char *api_base, const char *urls_csv, const char *objective) {
+    parallel_init();
+    char *key = parallel_find_key();
+    char *result = parallel_extract(api_base, key ? key : "", urls_csv, objective);
+    free(key);
+    return result;
 }
 
 /* ── public API ──────────────────────────────────────────────── */
