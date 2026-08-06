@@ -1,0 +1,31 @@
+{
+  "name": "parallel-pi-tools",
+  "version": "1.0.0",
+  "description": "This extension adds real-time web search and URL content extraction to [Pi](https://github.com/badlogic/pi-mono/) as native tools.",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mdlockyer/parallel-pi-tools.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/mdlockyer/parallel-pi-tools/issues"
+  },
+  "homepage": "https://github.com/mdlockyer/parallel-pi-tools#readme",
+  "dependencies": {
+    "koffi": "^3.1.4"
+  },
+  "allowScripts": {
+    "koffi@3.1.4": true
+  }
+}
