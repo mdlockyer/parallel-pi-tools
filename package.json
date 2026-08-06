@@ -1,23 +1,20 @@
 {
   "name": "parallel-pi-tools",
   "version": "1.0.0",
-  "description": "This extension adds real-time web search and URL content extraction to [Pi](https://github.com/badlogic/pi-mono/) as native tools.",
-  "main": "index.js",
-  "directories": {
-    "lib": "lib",
-    "test": "test"
-  },
+  "description": "Parallel web search and content extraction as native Pi tools",
+  "type": "module",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test test/unit.mjs",
+    "bench": "node test/benchmark.mjs",
+    "build": "make native"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mdlockyer/parallel-pi-tools.git"
   },
-  "keywords": [],
+  "keywords": ["pi", "parallel", "web-search", "ffi", "coding-agent"],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "bugs": {
     "url": "https://github.com/mdlockyer/parallel-pi-tools/issues"
   },
