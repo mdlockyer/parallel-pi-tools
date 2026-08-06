@@ -39,7 +39,7 @@ We built it. Compiled it. Benchmarked it.
 
 The C code itself was lightning fast. The problem was getting to it. Every call paid 7ms of `posix_spawn` kernel scheduling tax. The "slow" scripting language won because it avoided the syscall overhead entirely.
 
-## Attempt 4: The Clever Part — FFI
+## Attempt 4: The Clever Part
 
 What if we never leave the process?
 
@@ -49,11 +49,11 @@ We compiled the C code as a shared library (`.dylib`/`.so`) and called it direct
 
 ```
 ┌─────────────────┬──────────┬────────────────────────────────┐
-│ Approach        │ Avg      │ vs JS                         │
+│ Approach        │ Avg      │ vs JS                          │
 ├─────────────────┼──────────┼────────────────────────────────┤
 │ JS (fetch)      │ 1,500µs  │ baseline                       │
-│ C (subprocess)  │ 8,200µs  │ 5.5x slower                   │
-│ C (FFI)         │   564µs  │ 2.7x faster                   │
+│ C (subprocess)  │ 8,200µs  │ 5.5x slower                    │
+│ C (FFI)         │   564µs  │ 2.7x faster                    │
 └─────────────────┴──────────┴────────────────────────────────┘
 ```
 
@@ -85,8 +85,8 @@ The curl handle reuse was the monster. 400 microseconds of DNS + SSL setup, elim
 │ Approach                  │ Avg      │ Relative                            │
 ├───────────────────────────┼──────────┼─────────────────────────────────────┤
 │ C FFI (optimized)         │    93µs  │ ████████████████████████████████ 1x │
-│ JS (fetch + JSON.parse)   │ 1,500µs  │ ██ 16x slower                      │
-│ C (subprocess)            │ 8,200µs  │ ▏ 88x slower                       │
+│ JS (fetch + JSON.parse)   │ 1,500µs  │ ██ 16x slower                       │
+│ C (subprocess)            │ 8,200µs  │ ▏ 88x slower                        │
 └───────────────────────────┴──────────┴─────────────────────────────────────┘
 ```
 
@@ -128,17 +128,17 @@ The extension auto-detects your environment:
 │  ┌─────────────────────────────────────────────────────┐    │
 │  │  web_search / web_fetch                             │    │
 │  │       │                                             │    │
-│  │       ├─[API key?]──→ lib/ffi.mjs ──→ libparallel  │    │
+│  │       ├─[API key?]──→ lib/ffi.mjs ──→ libparallel   │    │
 │  │       │               (koffi FFI)    (C, 93µs)      │    │
 │  │       │                                             │    │
-│  │       └─[no key]───→ lib/parallel.mjs               │    │
+│  │       └─[no key]────→ lib/parallel.mjs              │    │
 │  │                       (JS fetch, 1.5ms)             │    │
 │  └─────────────────────────────────────────────────────┘    │
 │                                                             │
 │  Test suite                                                 │
 │  ┌─────────────────────────────────────────────────────┐    │
-│  │  mock-server.mjs  ←→  unit.mjs  (25 tests)         │    │
-│  │                     ←→  benchmark.mjs               │    │
+│  │  mock-server.mjs  ←→  unit.mjs  (25 tests)          │    │
+│  │                   ←→  benchmark.mjs.                │    │
 │  └─────────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -161,7 +161,7 @@ parallel-pi-tools/
 │   ├── unit.mjs             # 25 tests
 │   ├── benchmark.mjs        # 5-approach comparison
 │   └── benchmark.sh         # Runner script
-├── Makefile                  # install / test / bench / all
+├── Makefile                 # install / test / bench / all
 └── README.md
 ```
 
@@ -172,7 +172,7 @@ parallel-pi-tools/
 59a83fc Rewrite README in Docker docs style
 d18a3d6 Add mock server, unit tests, and benchmark
 fabb809 Overengineer: native C binary + benchmark proving JS is faster
-3fb04e3 Add FFI path — C in-process is 3x faster than JS, 16x faster than subprocess
+9a6731c Add FFI path. C in-process is 3x faster than JS, 16x faster than subprocess
 c0a6559 Optimize C: curl handle reuse, no cJSON for requests, stack buffers
 ```
 
