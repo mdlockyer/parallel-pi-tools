@@ -1,16 +1,18 @@
 // test/benchmark.mjs — Measures overhead introduced by the tool code layer.
-// Compares direct fetch vs lib wrappers (MCP path and API path).
+// Compares: raw fetch | JS lib | MCP path | subprocess | FFI
 // Run: node test/benchmark.mjs
 
-import { createMockServer } from "./mock-server.mjs";
+import { execFile } from "node:child_process";
+import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { promisify } from "node:util";
 import {
   callMcpTool,
   apiSearch,
   apiExtract,
-  extractMcpText,
 } from "../lib/parallel.mjs";
 import { nativeSearch, nativeExtract } from "../lib/native.mjs";
 
+const execFileAsync = promisify(execFile);
 const ITERATIONS = 100;
 const WARMUP = 10;
 
@@ -29,7 +31,6 @@ function stats(times) {
     p99: percentile(sorted, 99),
     max: sorted[sorted.length - 1],
     avg: sum / sorted.length,
-    total: sum,
   };
 }
 
@@ -38,7 +39,6 @@ function fmt(ms) {
 }
 
 async function bench(name, fn, iterations = ITERATIONS) {
-  // Warmup
   for (let i = 0; i < WARMUP; i++) await fn();
 
   const times = [];
@@ -65,102 +65,143 @@ async function rawFetch(url, body) {
   await res.json();
 }
 
+async function startMockServer() {
+  const proc = execFile("node", ["test/mock-server.mjs", "0"], {
+    cwd: new URL("..", import.meta.url).pathname,
+  });
+
+  return new Promise((resolve, reject) => {
+    let output = "";
+    const timeout = setTimeout(() => reject(new Error("mock server timeout")), 5000);
+
+    proc.stdout.on("data", (data) => {
+      output += data.toString();
+      const match = output.match(/Mock server listening on (http:\/\/[^\s]+)/);
+      if (match) {
+        clearTimeout(timeout);
+        resolve({ url: match[1], proc });
+      }
+    });
+
+    proc.stderr.on("data", (data) => {
+      output += data.toString();
+    });
+  });
+}
+
 async function main() {
   console.log(`\nparallel-pi-tools benchmark`);
-  console.log(`iterations: ${ITERATIONS}  |  warmup: ${WARMUP}\n`);
+  console.log(`iterations: ${ITERATIONS}  |  warmup: ${WARMUP}`);
 
-  const server = await createMockServer({ port: 0 });
-  console.log(`mock server: ${server.url}`);
+  // Start mock server as separate process (needed for FFI + subprocess)
+  const mock = await startMockServer();
+  console.log(`mock server: ${mock.url} (pid ${mock.proc.pid})\n`);
 
   try {
-    // --- Baseline: raw fetch to mock API ---
+    // ── baselines ──
+
     const baselineSearch = await bench(
       "baseline: raw fetch /v1/search",
-      () => rawFetch(`${server.url}/v1/search`, { objective: "test" })
+      () => rawFetch(`${mock.url}/v1/search`, { objective: "test" })
     );
 
     const baselineExtract = await bench(
       "baseline: raw fetch /v1/extract",
-      () => rawFetch(`${server.url}/v1/extract`, { urls: ["https://example.com"] })
+      () => rawFetch(`${mock.url}/v1/extract`, { urls: ["https://example.com"] })
     );
 
     const baselineMcp = await bench(
       "baseline: raw fetch /mcp (search)",
       () =>
-        rawFetch(`${server.url}/mcp`, {
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
+        rawFetch(`${mock.url}/mcp`, {
+          jsonrpc: "2.0", id: 1, method: "tools/call",
           params: { name: "web_search", arguments: { objective: "test" } },
         })
     );
 
-    // --- Tool layer: lib wrappers (API path) ---
+    // ── JS lib wrappers ──
+
     const toolSearch = await bench(
-      "tool: apiSearch (lib wrapper)",
-      () => apiSearch("bench-key", "test", [], { apiBase: server.url + "/v1" })
+      "tool: apiSearch (JS lib)",
+      () => apiSearch("bench-key", "test", [], { apiBase: mock.url + "/v1" })
     );
 
     const toolExtract = await bench(
-      "tool: apiExtract (lib wrapper)",
-      () => apiExtract("bench-key", ["https://example.com"], undefined, { apiBase: server.url + "/v1" })
+      "tool: apiExtract (JS lib)",
+      () => apiExtract("bench-key", ["https://example.com"], undefined, { apiBase: mock.url + "/v1" })
     );
 
-    // --- Tool layer: lib wrappers (MCP path) ---
     const toolMcpSearch = await bench(
-      "tool: callMcpTool web_search (MCP path)",
-      () => callMcpTool("web_search", { objective: "test" }, { mcpUrl: server.url + "/mcp" })
+      "tool: callMcpTool web_search (MCP)",
+      () => callMcpTool("web_search", { objective: "test" }, { mcpUrl: mock.url + "/mcp" })
     );
 
-    const toolMcpExtract = await bench(
-      "tool: callMcpTool web_fetch (MCP path)",
-      () => callMcpTool("web_fetch", { urls: ["https://example.com"] }, { mcpUrl: server.url + "/mcp" })
+    // ── subprocess (C binary) ──
+
+    const subSearch = await bench(
+      "native: C subprocess search",
+      () => nativeSearch(mock.url + "/v1", "bench-key", "test")
     );
 
-    // --- Native C binary (subprocess) ---
-    let nativeSearchStats, nativeExtractStats;
+    const subExtract = await bench(
+      "native: C subprocess extract",
+      () => nativeExtract(mock.url + "/v1", "bench-key", ["https://example.com"])
+    );
+
+    // ── FFI (C in-process) ──
+
+    let ffiSearchStats, ffiExtractStats;
     try {
-      nativeSearchStats = await bench(
-        "native: C binary search (subprocess)",
-        () => nativeSearch(server.url + "/v1", "bench-key", "test")
+      const { ffiSearch, ffiExtract } = await import("../lib/ffi.mjs");
+
+      ffiSearchStats = await bench(
+        "native: C FFI search (in-process)",
+        () => ffiSearch(mock.url + "/v1", "bench-key", "test")
       );
 
-      nativeExtractStats = await bench(
-        "native: C binary extract (subprocess)",
-        () => nativeExtract(server.url + "/v1", "bench-key", ["https://example.com"])
+      ffiExtractStats = await bench(
+        "native: C FFI extract (in-process)",
+        () => ffiExtract(mock.url + "/v1", "bench-key", ["https://example.com"])
       );
     } catch (err) {
-      console.log(`\n  ⚠ native binary not available: ${err.message}`);
-      console.log(`    Run 'make' in native/ to build it.\n`);
+      console.log(`\n  ⚠ FFI not available: ${err.message}`);
     }
 
-    // --- Overhead summary ---
-    console.log(`\n${"═".repeat(54)}`);
+    // ── summary ──
+
+    const line = "═".repeat(58);
+    const thin = "─".repeat(58);
+
+    console.log(`\n${line}`);
     console.log(`  OVERHEAD SUMMARY (avg)`);
-    console.log(`${"═".repeat(54)}`);
+    console.log(`${line}`);
+    console.log(`  Search (JS):     ${fmt(toolSearch.avg - baselineSearch.avg)} overhead  vs baseline`);
+    console.log(`  Extract (JS):    ${fmt(toolExtract.avg - baselineExtract.avg)} overhead  vs baseline`);
+    console.log(`  Search (MCP):    ${fmt(toolMcpSearch.avg - baselineMcp.avg)} overhead  vs baseline`);
+    console.log(`${thin}`);
+    console.log(`  Search (sub):    ${fmt(subSearch.avg)} avg  (+${fmt(subSearch.avg - baselineSearch.avg)} vs baseline)`);
+    console.log(`  Extract (sub):   ${fmt(subExtract.avg)} avg  (+${fmt(subExtract.avg - baselineExtract.avg)} vs baseline)`);
 
-    const searchOverhead = toolSearch.avg - baselineSearch.avg;
-    const extractOverhead = toolExtract.avg - baselineExtract.avg;
-    const mcpOverhead = toolMcpSearch.avg - baselineMcp.avg;
-
-    console.log(`  Search (API):  ${fmt(searchOverhead)} tool overhead  (${((searchOverhead / baselineSearch.avg) * 100).toFixed(1)}%)`);
-    console.log(`  Extract (API): ${fmt(extractOverhead)} tool overhead  (${((extractOverhead / baselineExtract.avg) * 100).toFixed(1)}%)`);
-    console.log(`  Search (MCP):  ${fmt(mcpOverhead)} tool overhead  (${((mcpOverhead / baselineMcp.avg) * 100).toFixed(1)}%)`);
-
-    if (nativeSearchStats && nativeExtractStats) {
-      const nativeSearchOverhead = nativeSearchStats.avg - baselineSearch.avg;
-      const nativeExtractOverhead = nativeExtractStats.avg - baselineExtract.avg;
-      console.log(`${"─".repeat(54)}`);
-      console.log(`  Search (C):    ${fmt(nativeSearchStats.avg)} avg  (${fmt(nativeSearchOverhead)} vs baseline, ${((nativeSearchOverhead / baselineSearch.avg) * 100).toFixed(1)}%)`);
-      console.log(`  Extract (C):   ${fmt(nativeExtractStats.avg)} avg  (${fmt(nativeExtractOverhead)} vs baseline, ${((nativeExtractOverhead / baselineExtract.avg) * 100).toFixed(1)}%)`);
-      console.log(`${"─".repeat(54)}`);
-      const jsVsNative = toolSearch.avg - nativeSearchStats.avg;
-      console.log(`  JS vs C (search):  ${jsVsNative > 0 ? "C faster by" : "JS faster by"} ${fmt(Math.abs(jsVsNative))}`);
+    if (ffiSearchStats) {
+      console.log(`${thin}`);
+      console.log(`  Search (FFI):    ${fmt(ffiSearchStats.avg)} avg  (+${fmt(ffiSearchStats.avg - baselineSearch.avg)} vs baseline)`);
+      console.log(`  Extract (FFI):   ${fmt(ffiExtractStats.avg)} avg  (+${fmt(ffiExtractStats.avg - baselineExtract.avg)} vs baseline)`);
     }
 
-    console.log(`${"═".repeat(54)}\n`);
+    console.log(`${thin}`);
+    console.log(`  JS vs subprocess:  JS faster by ${fmt(subSearch.avg - toolSearch.avg)}`);
+    if (ffiSearchStats) {
+      const ffiVsJs = toolSearch.avg - ffiSearchStats.avg;
+      if (ffiVsJs > 0) {
+        console.log(`  FFI vs JS:         FFI faster by ${fmt(ffiVsJs)}`);
+      } else {
+        console.log(`  FFI vs JS:         JS faster by ${fmt(Math.abs(ffiVsJs))}`);
+      }
+      console.log(`  FFI vs subprocess: FFI faster by ${fmt(subSearch.avg - ffiSearchStats.avg)}`);
+    }
+    console.log(`${line}\n`);
   } finally {
-    await server.close();
+    mock.proc.kill();
   }
 }
 
