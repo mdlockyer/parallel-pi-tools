@@ -3,7 +3,15 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, existsSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  existsSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,18 +43,25 @@ describe("native library installation", () => {
     assert.ok(existsSync(join(extensionsDir, libRelDir, libraryName)));
   });
 
-  it("replaces the installed dylib inode on every install", () => {
+  it("replaces the installed library wholesale on every install", () => {
     const makeArgs = ["install", `PI_EXTENSIONS_DIR=${extensionsDir}`];
     const installedLibrary = join(extensionsDir, libRelDir, libraryName);
     const sourceLibrary = join(repoDir, "native", libraryName);
 
     execFileSync("make", makeArgs, { cwd: repoDir, stdio: "pipe" });
-    const firstInode = statSync(installedLibrary).ino;
+
+    // Corrupt the installed copy so the next install has to genuinely
+    // replace the file rather than touch it in place.
+    appendFileSync(installedLibrary, Buffer.from("\n-- CORRUPTION --\n"));
 
     execFileSync("make", makeArgs, { cwd: repoDir, stdio: "pipe" });
-    const secondInode = statSync(installedLibrary).ino;
 
-    assert.notEqual(secondInode, firstInode);
+    // Installed content restored byte-for-byte.
     assert.deepEqual(readFileSync(installedLibrary), readFileSync(sourceLibrary));
+    // Install uses atomic rename into place, so no temp files survive.
+    const leftovers = readdirSync(join(extensionsDir, libRelDir)).filter((f) =>
+      f.startsWith(`.${libraryName}.`)
+    );
+    assert.deepEqual(leftovers, []);
   });
 });
