@@ -1,6 +1,6 @@
 {
   "name": "parallel-pi-tools",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0",
   "description": "Parallel web search and content extraction as native Pi tools",
   "type": "module",
   "scripts": {
