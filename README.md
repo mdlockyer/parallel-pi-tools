@@ -29,10 +29,12 @@
 
 ## How it works
 
-Auto-detects your environment:
+Uses the native C library in-process via koffi FFI (async, worker thread — the TUI never blocks). No JS fallback for API calls.
 
-- **`PARALLEL_API_KEY` set** → calls `https://api.parallel.ai/v1/` directly via C FFI
+- **`PARALLEL_API_KEY` set** → direct API via native C FFI
 - **No key** → falls back to the free MCP endpoint via JS
+
+The C path covers the full API surface — multi-query searches, comma-containing URLs, and all escaping.
 
 ```bash
 # Set your key (optional)
@@ -47,12 +49,14 @@ cd parallel-pi-tools
 make install
 ```
 
+Builds the native library, copies `web-search.ts` + `lib/web-search/` + the shared library into `~/.pi/agent/extensions/`, and installs `koffi` there on first run.
+
 Run `/reload` in Pi. Done.
 
 ## Test
 
 ```bash
-make test    # 25 tests
+make test    # 31 tests (incl. native FFI equivalence vs JS)
 make bench   # 5-approach benchmark
 make all     # both
 ```
@@ -67,21 +71,23 @@ make uninstall
 
 ```
 parallel-pi-tools/
-├── parallel-search.ts       # Pi extension
+├── web-search.ts            # Pi extension
 ├── lib/
-│   ├── parallel.mjs         # Core logic (JS)
-│   └── ffi.mjs              # FFI bridge (koffi → C)
+│   ├── parallel.mjs         # Core logic (native FFI only)
+│   └── ffi.mjs              # koffi bridge → libparallel (async, leak-free)
 ├── native/
 │   ├── parallel_lib.c       # Shared library (libcurl + cJSON)
 │   └── parallel.c           # CLI binary
 ├── test/
 │   ├── mock-server.mjs      # Mock API server
-│   ├── unit.mjs             # 25 tests
+│   ├── unit.mjs             # 31 tests
 │   └── benchmark.mjs        # Performance comparison
 ├── docs/
 │   └── index.html           # Landing page
 └── Makefile
 ```
+
+The extension calls `apiSearch`/`apiExtract` which route through the C FFI (async, so Pi stays responsive). MCP tool call is the free fallback when no API key is set.
 
 ## Docs
 

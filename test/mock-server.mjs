@@ -71,6 +71,8 @@ const MOCK_MCP_EXTRACT_RESULT = {
   ],
 };
 
+const MOCK_SESSION_ID = "mock-session-0123456789abcdef";
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -90,10 +92,15 @@ function json(res, status, data) {
  * @param {object} opts
  * @param {number} opts.port - Port to listen on (0 for random)
  * @param {number} opts.delayMs - Artificial delay in ms (default 0)
+ * @param {number|null} opts.searchErrorStatus - When set, /v1/search fails
+ *   with this HTTP status (body carries a JSON error message) so callers can
+ *   exercise error propagation.
  * @returns {Promise<{ url: string, port: number, close: () => Promise<void> }>}
  */
-export function createMockServer({ port = 0, delayMs = 0 } = {}) {
+export function createMockServer({ port = 0, delayMs = 0, searchErrorStatus = null } = {}) {
   return new Promise((resolve, reject) => {
+    // Mutable so tests can toggle failure mode between calls.
+    const state = { searchErrorStatus };
     const server = createServer(async (req, res) => {
       if (delayMs > 0) {
         await new Promise((r) => setTimeout(r, delayMs));
@@ -105,6 +112,11 @@ export function createMockServer({ port = 0, delayMs = 0 } = {}) {
       if (req.method === "POST" && url.pathname === "/v1/search") {
         const body = JSON.parse(await readBody(req));
         if (!body.objective) return json(res, 400, { error: "missing objective" });
+        if (state.searchErrorStatus !== null) {
+          return json(res, state.searchErrorStatus, {
+            error: { code: -32000, message: `mock failure ${state.searchErrorStatus}` },
+          });
+        }
         return json(res, 200, MOCK_SEARCH_RESPONSE);
       }
 
@@ -114,9 +126,37 @@ export function createMockServer({ port = 0, delayMs = 0 } = {}) {
         return json(res, 200, MOCK_EXTRACT_RESPONSE);
       }
 
-      // --- MCP endpoint ---
+      // --- MCP endpoint (streamable HTTP; speaks the initialize handshake
+      // but also tolerates stateless direct tools/call) ---
       if (req.method === "POST" && url.pathname === "/mcp") {
         const body = JSON.parse(await readBody(req));
+
+        if (body.method === "initialize") {
+          res.writeHead(200, {
+            "Content-Type": "application/json",
+            "Mcp-Session-Id": MOCK_SESSION_ID,
+          });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: {
+                protocolVersion: body.params?.protocolVersion ?? "2025-06-18",
+                capabilities: {},
+                serverInfo: { name: "mock-mcp", version: "1.0.0" },
+              },
+            })
+          );
+          return;
+        }
+
+        // Notifications carry no id; acknowledge without a body per spec.
+        if (body.method?.startsWith("notifications/")) {
+          res.writeHead(202);
+          res.end();
+          return;
+        }
+
         if (body.method !== "tools/call") {
           return json(res, 200, {
             jsonrpc: "2.0",
@@ -140,6 +180,30 @@ export function createMockServer({ port = 0, delayMs = 0 } = {}) {
           });
         }
 
+        // Test hooks driven by magic markers in the arguments:
+        // __mcp_error__ -> JSON-RPC error response
+        // __sse__       -> event-stream response whose FIRST data event is a
+        //                  result with no usable text (regression test for the
+        //                  parse_sse_result double-free), followed by the real
+        //                  result.
+        const argsStr = JSON.stringify(body.params?.arguments ?? {});
+        if (argsStr.includes("__mcp_error__")) {
+          return json(res, 200, {
+            jsonrpc: "2.0",
+            id: body.id,
+            error: { code: -32000, message: "mock mcp failure" },
+          });
+        }
+        if (argsStr.includes("__sse__")) {
+          res.writeHead(200, { "Content-Type": "text/event-stream" });
+          const evt = (payload) => `event: message\ndata: ${JSON.stringify(payload)}\n\n`;
+          res.end(
+            evt({ jsonrpc: "2.0", id: body.id, result: { content: [{ type: "text", text: "" }] } }) +
+            evt({ jsonrpc: "2.0", id: body.id, result })
+          );
+          return;
+        }
+
         return json(res, 200, {
           jsonrpc: "2.0",
           id: body.id,
@@ -155,6 +219,7 @@ export function createMockServer({ port = 0, delayMs = 0 } = {}) {
       resolve({
         url: `http://127.0.0.1:${addr.port}`,
         port: addr.port,
+        setSearchErrorStatus(v) { state.searchErrorStatus = v; },
         close: () => new Promise((r) => server.close(r)),
       });
     });

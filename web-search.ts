@@ -8,11 +8,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   findApiKey,
-  callMcpTool,
   apiSearch,
   apiExtract,
-  extractMcpText,
-} from "./lib/parallel.mjs";
+  mcpSearch,
+  mcpFetch,
+} from "./lib/web-search/parallel.mjs";
 
 function applyTruncation(text: string): { content: string; truncated: boolean } {
   const truncation = truncateHead(text, {
@@ -29,13 +29,10 @@ function applyTruncation(text: string): { content: string; truncated: boolean } 
 }
 
 export default function (pi: ExtensionAPI) {
-  const apiKey = findApiKey();
-  const mode = apiKey ? "direct API" : "MCP (free, no key)";
-
   pi.registerTool({
     name: "web_search",
     label: "Web Search",
-    description: `Search the web using Parallel Search. Returns ranked URLs with LLM-optimized excerpts. Supports natural language objectives. Mode: ${mode}`,
+    description: `Search the web using Parallel Search. Returns ranked URLs with LLM-optimized excerpts. Supports natural language objectives. Uses the direct API when a PARALLEL_* key is set in the environment, otherwise the free MCP fallback. Native C FFI.`,
     promptSnippet: "Search the web for real-time information",
     promptGuidelines: [
       "Use web_search when you need current information from the web that is not in your training data.",
@@ -53,17 +50,13 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        let text: string;
+        // Resolve the key per call so env changes after extension load are
+        // picked up without a /reload (the scan is ~microseconds).
+        const apiKey = findApiKey();
         const queries = params.search_queries?.length ? params.search_queries : [params.objective];
-
-        if (apiKey) {
-          text = await apiSearch(apiKey, params.objective, queries);
-        } else {
-          const args: Record<string, unknown> = { objective: params.objective, search_queries: queries };
-          const result = await callMcpTool("web_search", { objective: params.objective, search_queries: queries });
-          text = extractMcpText(result);
-          if (result.isError) throw new Error(text || "Search returned an error");
-        }
+        const text = apiKey
+          ? await apiSearch(apiKey, params.objective, queries)
+          : await mcpSearch(params.objective, queries);
 
         const { content, truncated } = applyTruncation(text);
         return {
@@ -80,7 +73,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "web_fetch",
     label: "Web Fetch",
-    description: `Extract content from one or more URLs using Parallel Extract. Returns clean, LLM-optimized markdown. Mode: ${mode}`,
+    description: `Extract content from one or more URLs using Parallel Extract. Returns clean, LLM-optimized markdown. Uses the direct API when a PARALLEL_* key is set in the environment, otherwise the free MCP fallback. Native C FFI.`,
     promptSnippet: "Fetch and extract content from specific URLs",
     promptGuidelines: [
       "Use web_fetch to extract readable content from specific web pages when you have URLs.",
@@ -99,17 +92,10 @@ export default function (pi: ExtensionAPI) {
     }),
     async execute(_toolCallId, params) {
       try {
-        let text: string;
-
-        if (apiKey) {
-          text = await apiExtract(apiKey, params.urls, params.objective);
-        } else {
-          const args: Record<string, unknown> = { urls: params.urls };
-          if (params.objective) args.objective = params.objective;
-          const result = await callMcpTool("web_fetch", args);
-          text = extractMcpText(result);
-          if (result.isError) throw new Error(text || "Extract returned an error");
-        }
+        const apiKey = findApiKey();
+        const text = apiKey
+          ? await apiExtract(apiKey, params.urls, params.objective)
+          : await mcpFetch(params.urls, params.objective);
 
         const { content, truncated } = applyTruncation(text);
         return {

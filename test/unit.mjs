@@ -5,11 +5,12 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import {
   findApiKey,
-  callMcpTool,
   apiSearch,
   apiExtract,
-  extractMcpText,
-} from "../lib/parallel.mjs";
+  mcpSearch,
+  mcpFetch,
+  nativeActive,
+} from "../lib/web-search/parallel.mjs";
 import { createMockServer } from "./mock-server.mjs";
 import { nativeSearch, nativeExtract } from "../lib/native.mjs";
 import { existsSync } from "node:fs";
@@ -58,38 +59,25 @@ describe("findApiKey", () => {
     assert.equal(findApiKey({ HOME: "/home/user" }), undefined);
   });
 
-  it("picks the first matching key", () => {
+  it("picks the first matching key (env insertion order)", () => {
     const env = { PARALLEL_KEY: "first", PARALLEL_API_KEY: "second" };
-    const result = findApiKey(env);
-    assert.ok(result === "first" || result === "second");
-  });
-});
-
-// --- extractMcpText ---
-
-describe("extractMcpText", () => {
-  it("extracts text from content array", () => {
-    const result = extractMcpText({
-      content: [
-        { type: "text", text: "hello" },
-        { type: "text", text: "world" },
-      ],
-    });
-    assert.equal(result, "hello\n\nworld");
+    assert.equal(findApiKey(env), "first");
   });
 
-  it("skips non-text content", () => {
-    const result = extractMcpText({
-      content: [
-        { type: "image", data: "base64..." },
-        { type: "text", text: "only this" },
-      ],
-    });
-    assert.equal(result, "only this");
-  });
-
-  it("returns empty string for no text content", () => {
-    assert.equal(extractMcpText({ content: [] }), "");
+  it("matches every name shape covered by the C matcher", () => {
+    // Keep in sync with is_parallel_key_name() in native/parallel_lib.c.
+    for (const name of [
+      "PARALLEL_API_KEY", "PARALLEL_KEY", "PARALLELSECRET",
+      "PARALLEL_TOKEN", "PARALLEL_SECRET", "PARALLEL_APISECRET",
+      "PARALLEL_APITOKEN", "PARALLEL_APIKEY", "PARALLELAPIKEY",
+      "PARALLEL-API-KEY", "Parallel_Token",
+    ]) {
+      assert.equal(findApiKey({ [name]: "v" }), "v", name);
+    }
+    // Near-misses must not match.
+    assert.equal(findApiKey({ PARALLEL_KEYS: "v" }), undefined);
+    assert.equal(findApiKey({ PARALLEL_SECRET_KEY_NO: "v" }), undefined);
+    assert.equal(findApiKey({ XPARALLEL_KEY: "v" }), undefined);
   });
 });
 
@@ -106,34 +94,41 @@ describe("with mock server", () => {
     await server?.close();
   });
 
-  // --- callMcpTool ---
+  // --- mcpSearch / mcpFetch (native C MCP fallback) ---
 
-  describe("callMcpTool", () => {
+  describe("mcpSearch", () => {
     it("calls web_search via MCP", async () => {
-      const result = await callMcpTool(
-        "web_search",
-        { objective: "test query" },
-        { mcpUrl: server.url + "/mcp" }
-      );
-      assert.ok(result.content);
-      assert.ok(result.content[0].text.includes("Mock Result"));
+      const text = await mcpSearch("test query", [], { mcpUrl: server.url + "/mcp" });
+      assert.ok(text.includes("Mock Result"));
     });
 
-    it("calls web_fetch via MCP", async () => {
-      const result = await callMcpTool(
-        "web_fetch",
-        { urls: ["https://example.com"] },
-        { mcpUrl: server.url + "/mcp" }
-      );
-      assert.ok(result.content);
-      assert.ok(result.content[0].text.includes("Extracted Article"));
+    it("includes search queries", async () => {
+      const text = await mcpSearch("test", ["q1", "q2"], { mcpUrl: server.url + "/mcp" });
+      assert.ok(text.length > 0);
     });
 
-    it("throws on unknown tool", async () => {
+    it("survives SSE streams whose first event has no text (double-free regression)", async () => {
+      const text = await mcpSearch("__sse__ query", [], { mcpUrl: server.url + "/mcp" });
+      assert.ok(text.includes("Mock Result"));
+    });
+
+    it("surfaces JSON-RPC errors from the MCP endpoint", async () => {
       await assert.rejects(
-        () => callMcpTool("unknown_tool", {}, { mcpUrl: server.url + "/mcp" }),
-        /Unknown tool/
+        () => mcpSearch("__mcp_error__ query", [], { mcpUrl: server.url + "/mcp" }),
+        /MCP error -32000: mock mcp failure/
       );
+    });
+  });
+
+  describe("mcpFetch", () => {
+    it("calls web_fetch via MCP", async () => {
+      const text = await mcpFetch(["https://example.com"], undefined, { mcpUrl: server.url + "/mcp" });
+      assert.ok(text.includes("Extracted Article"));
+    });
+
+    it("passes objective", async () => {
+      const text = await mcpFetch(["https://example.com"], "focus", { mcpUrl: server.url + "/mcp" });
+      assert.ok(text.length > 0);
     });
   });
 
@@ -150,7 +145,6 @@ describe("with mock server", () => {
     });
 
     it("includes search queries in request", async () => {
-      // Just verify it doesn't throw with queries
       const text = await apiSearch("fake-key", "test", ["q1", "q2"], {
         apiBase: server.url + "/v1",
       });
@@ -179,11 +173,23 @@ describe("with mock server", () => {
       assert.ok(text.length > 0);
     });
 
-    it("rejects when API returns error", async () => {
+    it("rejects when API returns error, surfacing status + body", async () => {
       await assert.rejects(
         () => apiExtract("fake-key", [], undefined, { apiBase: server.url + "/v1" }),
-        /Extract API failed/
+        /HTTP 400/
       );
+    });
+
+    it("propagates HTTP status and server message on search failure", async () => {
+      server.setSearchErrorStatus(401);
+      try {
+        await assert.rejects(
+          () => apiSearch("bad-key", "test", [], { apiBase: server.url + "/v1" }),
+          /HTTP 401.*mock failure 401/s
+        );
+      } finally {
+        server.setSearchErrorStatus(null);
+      }
     });
   });
 
@@ -213,8 +219,67 @@ describe("with mock server", () => {
 
     (binaryExists ? it : it.skip)("nativeExtract output matches JS output", async () => {
       const native = await nativeExtract(server.url + "/v1", "key", ["https://example.com"]);
-      const js = await apiExtract("key", ["https://example.com"], undefined, { apiBase: server.url + "/v1" });
+      const js = await apiExtract("key", ["https://example.com"], undefined, { apiBase: server.url + "/v1", transport: "js" });
       assert.equal(native.trim(), js.trim());
+    });
+  });
+
+  // --- native FFI dispatch ---
+
+  describe("native FFI dispatch", () => {
+    const n = nativeActive();
+
+    (n ? it : it.skip)("apiSearch returns formatted results", async () => {
+      const text = await apiSearch("key", "test", [], {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.includes("Mock Result One"));
+      assert.ok(text.includes("example.com/result-1"));
+    });
+
+    (n ? it : it.skip)("apiExtract returns formatted results", async () => {
+      const text = await apiExtract("key", ["https://example.com"], undefined, {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.includes("Mock Extracted Article"));
+    });
+
+    (n ? it : it.skip)("handles multi-query searches", async () => {
+      const text = await apiSearch("key", "objective", ["q1", "q2"], {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.length > 0);
+    });
+
+    (n ? it : it.skip)("handles URLs containing commas", async () => {
+      const urls = ["https://example.com/a,b"];
+      const text = await apiExtract("key", urls, undefined, {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.length > 0);
+    });
+
+    (n ? it : it.skip)("escapes special characters in objective JSON", async () => {
+      const text = await apiSearch('key', 'say "hi" \\there', [], {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.includes("Mock Result One"));
+    });
+
+    (n ? it : it.skip)("escapes quotes/backslashes in search_queries JSON", async () => {
+      const queries = ['q with "quotes"', 'b\\slash', 'n\tline'];
+      const text = await apiSearch("key", "obj", queries, {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.length > 0);
+    });
+
+    (n ? it : it.skip)("handles multiple URLs with commas and objectives", async () => {
+      const urls = ["https://example.com/a,b", "https://example.com/c?x=1,2"];
+      const text = await apiExtract("key", urls, "focus", {
+        apiBase: server.url + "/v1",
+      });
+      assert.ok(text.length > 0);
     });
   });
 });

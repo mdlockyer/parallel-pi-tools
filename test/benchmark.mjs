@@ -3,13 +3,13 @@
 // Run: node test/benchmark.mjs
 
 import { execFile } from "node:child_process";
-import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
 import { promisify } from "node:util";
 import {
-  callMcpTool,
+  mcpSearch,
+  mcpFetch,
   apiSearch,
   apiExtract,
-} from "../lib/parallel.mjs";
+} from "../lib/web-search/parallel.mjs";
 import { nativeSearch, nativeExtract } from "../lib/native.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -93,7 +93,6 @@ async function main() {
   console.log(`\nparallel-pi-tools benchmark`);
   console.log(`iterations: ${ITERATIONS}  |  warmup: ${WARMUP}`);
 
-  // Start mock server as separate process (needed for FFI + subprocess)
   const mock = await startMockServer();
   console.log(`mock server: ${mock.url} (pid ${mock.proc.pid})\n`);
 
@@ -102,85 +101,86 @@ async function main() {
 
     const baselineSearch = await bench(
       "baseline: raw fetch /v1/search",
-      () => rawFetch(`${mock.url}/v1/search`, { objective: "test" })
+      () => rawFetch(`${mock.url}/v1/search`, { objective: "test" }),
     );
 
     const baselineExtract = await bench(
       "baseline: raw fetch /v1/extract",
-      () => rawFetch(`${mock.url}/v1/extract`, { urls: ["https://example.com"] })
+      () => rawFetch(`${mock.url}/v1/extract`, { urls: ["https://example.com"] }),
     );
 
     const baselineMcp = await bench(
       "baseline: raw fetch /mcp (search)",
       () =>
         rawFetch(`${mock.url}/mcp`, {
-          jsonrpc: "2.0", id: 1, method: "tools/call",
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
           params: { name: "web_search", arguments: { objective: "test" } },
-        })
+        }),
     );
 
-    // ── JS lib wrappers ──
-
-    const toolSearch = await bench(
-      "tool: apiSearch (JS lib)",
-      () => apiSearch("bench-key", "test", [], { apiBase: mock.url + "/v1" })
+    // ── JS lib wrappers (route through the C library via koffi FFI) ──
+    const toolSearchAuto = await bench(
+      "tool: apiSearch (auto → native)",
+      () => apiSearch("bench-key", "test", [], { apiBase: mock.url + "/v1" }),
     );
 
-    const toolExtract = await bench(
-      "tool: apiExtract (JS lib)",
-      () => apiExtract("bench-key", ["https://example.com"], undefined, { apiBase: mock.url + "/v1" })
+    const toolExtractAuto = await bench(
+      "tool: apiExtract (auto → native)",
+      () => apiExtract("bench-key", ["https://example.com"], undefined, { apiBase: mock.url + "/v1" }),
     );
 
     const toolMcpSearch = await bench(
-      "tool: callMcpTool web_search (MCP)",
-      () => callMcpTool("web_search", { objective: "test" }, { mcpUrl: mock.url + "/mcp" })
+      "tool: mcpSearch (MCP)",
+      () => mcpSearch("test", [], { mcpUrl: mock.url + "/mcp" }),
+    );
+
+    const toolMcpFetch = await bench(
+      "tool: mcpFetch (MCP)",
+      () => mcpFetch(["https://example.com"], undefined, { mcpUrl: mock.url + "/mcp" }),
     );
 
     // ── subprocess (C binary) ──
 
     const subSearch = await bench(
       "native: C subprocess search",
-      () => nativeSearch(mock.url + "/v1", "bench-key", "test")
+      () => nativeSearch(mock.url + "/v1", "bench-key", "test"),
     );
 
     const subExtract = await bench(
       "native: C subprocess extract",
-      () => nativeExtract(mock.url + "/v1", "bench-key", ["https://example.com"])
+      () => nativeExtract(mock.url + "/v1", "bench-key", ["https://example.com"]),
     );
 
-    // ── FFI (C in-process) ──
+    // ── FFI (C in-process, full surface via JSON) ──
 
     let ffiSearchStats, ffiExtractStats;
     try {
-      const { ffiSearch, ffiExtract, ffiSearchAuto, ffiExtractAuto, ffiFindKey } = await import("../lib/ffi.mjs");
+      const { ffiSearch, ffiExtract, ffiFindKey } = await import("../lib/web-search/ffi.mjs");
 
       ffiSearchStats = await bench(
         "native: C FFI search (in-process)",
-        () => ffiSearch(mock.url + "/v1", "bench-key", "test")
+        () => ffiSearch(mock.url + "/v1", "bench-key", "test"),
       );
 
       ffiExtractStats = await bench(
         "native: C FFI extract (in-process)",
-        () => ffiExtract(mock.url + "/v1", "bench-key", ["https://example.com"])
+        () => ffiExtract(mock.url + "/v1", "bench-key", ["https://example.com"]),
       );
 
-      // Key detection overhead
+      // Full-surface: multi-query and comma URLs — still via C, no JS fallback
       await bench(
-        "native: C key detection (getenv scan)",
-        () => ffiFindKey(),
-        1000
-      );
-
-      // Full pipeline: key detection + search in one FFI call
-      await bench(
-        "native: C FFI search_auto (full pipeline)",
-        () => ffiSearchAuto(mock.url + "/v1", "test")
+        "native: C FFI search multi-query",
+        () => ffiSearch(mock.url + "/v1", "bench-key", "test", ["q1", "q2", 'q with "quotes"']),
       );
 
       await bench(
-        "native: C FFI extract_auto (full pipeline)",
-        () => ffiExtractAuto(mock.url + "/v1", ["https://example.com"])
+        "native: C FFI extract comma URLs",
+        () => ffiExtract(mock.url + "/v1", "bench-key", ["https://example.com/a,b", "https://example.com/c"], "obj"),
       );
+
+      await bench("native: C key detection (getenv scan)", () => ffiFindKey(), 1000);
     } catch (err) {
       console.log(`\n  ⚠ FFI not available: ${err.message}`);
     }
@@ -193,9 +193,10 @@ async function main() {
     console.log(`\n${line}`);
     console.log(`  OVERHEAD SUMMARY (avg)`);
     console.log(`${line}`);
-    console.log(`  Search (JS):     ${fmt(toolSearch.avg - baselineSearch.avg)} overhead  vs baseline`);
-    console.log(`  Extract (JS):    ${fmt(toolExtract.avg - baselineExtract.avg)} overhead  vs baseline`);
-    console.log(`  Search (MCP):    ${fmt(toolMcpSearch.avg - baselineMcp.avg)} overhead  vs baseline`);
+    console.log(`  Search (FFI):          ${fmt(toolSearchAuto.avg - baselineSearch.avg)} overhead  vs baseline`);
+    console.log(`  Extract (FFI):         ${fmt(toolExtractAuto.avg - baselineExtract.avg)} overhead  vs baseline`);
+    console.log(`  Search (MCP):          ${fmt(toolMcpSearch.avg - baselineMcp.avg)} overhead  vs baseline`);
+    console.log(`  Fetch (MCP):           ${fmt(toolMcpFetch.avg - baselineMcp.avg)} overhead  vs baseline`);
     console.log(`${thin}`);
     console.log(`  Search (sub):    ${fmt(subSearch.avg)} avg  (+${fmt(subSearch.avg - baselineSearch.avg)} vs baseline)`);
     console.log(`  Extract (sub):   ${fmt(subExtract.avg)} avg  (+${fmt(subExtract.avg - baselineExtract.avg)} vs baseline)`);
@@ -207,9 +208,8 @@ async function main() {
     }
 
     console.log(`${thin}`);
-    console.log(`  JS vs subprocess:  JS faster by ${fmt(subSearch.avg - toolSearch.avg)}`);
     if (ffiSearchStats) {
-      const ffiVsJs = toolSearch.avg - ffiSearchStats.avg;
+      const ffiVsJs = baselineSearch.avg - ffiSearchStats.avg;
       if (ffiVsJs > 0) {
         console.log(`  FFI vs JS:         FFI faster by ${fmt(ffiVsJs)}`);
       } else {
